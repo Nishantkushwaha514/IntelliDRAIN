@@ -1,0 +1,12 @@
+| Drain | Name                 |    Latitude |   Longitude | Approx. area |
+| ----- | -------------------- | ----------: | ----------: | ------------ |
+| D-01  | **Sangamwadi Drain** | **18.5416** | **73.8734** | Sangamwadi   |
+| D-02  | **Shivajinagar Central** |  18.5307 |   73.8478 | Shivajinagar  |
+| D-03  | **Koregaon Stream**      |  18.5369 |   73.8864 | Koregaon Park |
+| D-04  | **Kalyani Nagar East**   |  18.5481 |   73.9027 | Kalyani Nagar |
+| D-05  | **Viman Drain**          |  18.5662 |   73.9149 | Viman Nagar   |
+| D-06  | **Wadgaon Channel**      |  18.5537 |   73.9279 | Wadgaon Sheri |
+| D-07  | **Kharadi North**        |  18.5668 |   73.9461 | Kharadi       |
+| D-08  | **Mundhwa Creek**        |  18.5264 |   73.9235 | Mundhwa       |
+| D-09  | **Hadapsar West**        |  18.5087 |   73.9258 | Hadapsar      |
+| D-10  | **Magarpatta South**     |  18.5073 |   73.9168 | Magarpatta    |

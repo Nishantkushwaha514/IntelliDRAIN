@@ -1,0 +1,7 @@
+Django
+djangorestframework
+python-dotenv
+requests
+Pillow
+google-genai
+pydantic

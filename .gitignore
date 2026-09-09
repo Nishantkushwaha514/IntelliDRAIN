@@ -1,0 +1,26 @@
+# Python temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & IDE
+venv/
+.venv/
+env/
+.vscode/
+.idea/
+
+# Django files
+*.log
+*.sqlite3
+db.sqlite3
+
+# Media (uploaded/processed images) — keep folder structure, not the actual images
+media/processed_images/*
+!media/processed_images/.gitkeep
+drain_images/*/*
+!drain_images/*/.gitkeep
+!drain_images/*/processed
+
+# Secrets
+.env
