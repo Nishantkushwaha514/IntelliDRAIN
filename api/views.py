@@ -7,7 +7,7 @@ from rest_framework import status
 from .detector import get_detector
 from .services import fetch_live_rainfall
 from .risk import compute_risk_score, classify_risk
-from .models import Drain, Inspection
+from .models import Drain, Inspection, FloodRiskLog
 
 
 class BlockageDetectionView(APIView):
@@ -54,9 +54,12 @@ class BlockageDetectionView(APIView):
         blockage_pct = analysis.get("blockage_percentage", 0.0)
         blockage_ratio = blockage_pct / 100.0
 
-        rain_mm = request.data.get("rain_mm")
-        lat = request.data.get("latitude")
-        lon = request.data.get("longitude")
+        rain_mm = request.data.get("rain_mm") or request.data.get("rainfall_mm")
+        lat = request.data.get("latitude") or request.data.get("lat")
+        lon = request.data.get("longitude") or request.data.get("lon")
+
+        drain_id = request.data.get("drain_id") or request.data.get("drainId")
+        drain = get_drain_or_404(drain_id) if drain_id else None
 
         if rain_mm is not None:
             try:
@@ -66,11 +69,36 @@ class BlockageDetectionView(APIView):
         elif lat is not None and lon is not None:
             weather_metrics = fetch_live_rainfall(float(lat), float(lon))
             rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
+        elif drain and drain.latitude is not None and drain.longitude is not None:
+            weather_metrics = fetch_live_rainfall(drain.latitude, drain.longitude)
+            rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
         else:
             rainfall_mm = 0.0
 
         risk_score = compute_risk_score(blockage_ratio, rainfall_mm)
         risk_level, dispatch_action = classify_risk(risk_score)
+
+        lat_float, lon_float = None, None
+        if lat is not None and lon is not None:
+            try:
+                lat_float = float(lat)
+                lon_float = float(lon)
+            except (ValueError, TypeError):
+                pass
+        elif drain:
+            lat_float = drain.latitude
+            lon_float = drain.longitude
+
+        FloodRiskLog.objects.create(
+            drain=drain,
+            latitude=lat_float,
+            longitude=lon_float,
+            blockage_ratio=round(blockage_ratio, 3),
+            rainfall_mm=rainfall_mm,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            dispatch_action=dispatch_action,
+        )
 
         return Response({
             "status": "success",
@@ -114,6 +142,20 @@ class FloodRiskAssessmentView(APIView):
 
         risk_score = compute_risk_score(blockage_ratio, rainfall_mm)
         risk_level, dispatch_action = classify_risk(risk_score)
+
+        drain_id = request.data.get("drain_id") or request.data.get("drainId")
+        drain = get_drain_or_404(drain_id) if drain_id else None
+
+        FloodRiskLog.objects.create(
+            drain=drain,
+            latitude=float(lat),
+            longitude=float(lon),
+            blockage_ratio=blockage_ratio,
+            rainfall_mm=rainfall_mm,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            dispatch_action=dispatch_action,
+        )
 
         return Response({
             "status": "success",

@@ -34,7 +34,7 @@ class GeminiDrainDetector:
             raise ValueError("GEMINI_API_KEY environment variable is missing!")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-flash-latest"
 
     def analyze_uploaded_file(self, django_file) -> dict:
         """
@@ -58,7 +58,7 @@ class GeminiDrainDetector:
 
             response = None
             last_err = None
-            for model in [self.model_name, "gemini-3.1-flash-lite"]:
+            for model in [self.model_name, "gemini-3.8-flash", "gemini-flash-lite-latest", "gemini-2.5-flash"]:
                 try:
                     response = self.client.models.generate_content(
                         model=model,

@@ -79,3 +79,27 @@ class Inspection(models.Model):
         drain_name = getattr(self.drain, "name", "") or self.drain.area_name
         return f"{drain_id} ({drain_name}) — {self.date} — {self.new_status or self.status}"
 
+
+class FloodRiskLog(models.Model):
+    """
+    Historical log of flood risk assessments evaluated by the system.
+    Stores the environmental metrics, calculated risk scores, and dispatch actions.
+    """
+    drain = models.ForeignKey(Drain, on_delete=models.SET_NULL, null=True, blank=True, related_name="flood_risk_logs")
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+    blockage_ratio = models.FloatField(default=0.0)
+    rainfall_mm = models.FloatField(default=0.0)
+    risk_score = models.FloatField(default=0.0)
+    risk_level = models.CharField(max_length=20, default="LOW")
+    dispatch_action = models.TextField(blank=True, default="")
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+        verbose_name = "Flood Risk Log"
+        verbose_name_plural = "Flood Risk Logs"
+
+    def __str__(self):
+        return f"FloodRiskLog #{self.id} [{self.risk_level}] (score={self.risk_score}, blockage={self.blockage_ratio}, rain={self.rainfall_mm}mm)"
+

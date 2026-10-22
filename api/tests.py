@@ -1,5 +1,6 @@
 import os
 import io
+import tempfile
 from unittest.mock import patch, MagicMock
 from requests.exceptions import RequestException
 
@@ -8,7 +9,7 @@ from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
 from PIL import Image
 
-from api.models import Drain, Inspection
+from api.models import Drain, Inspection, FloodRiskLog
 from api.detector import DrainAnalysisSchema, GeminiDrainDetector, get_detector
 from api.risk import compute_risk_score, classify_risk
 from api.services import fetch_live_rainfall
@@ -629,4 +630,230 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertIsInstance(data, list)
         self.assertTrue(len(data) >= 1)
         self.assertEqual(data[0]["status"], "Cleared")
+
+
+# =====================================================================
+# 7. FLOOD RISK LOG PERSISTENCE AND ADMIN TESTS
+# =====================================================================
+
+class FloodRiskLogPersistenceTests(TestCase):
+    @patch("api.views.fetch_live_rainfall")
+    def test_flood_risk_assessment_view_persists_log(self, mock_fetch):
+        mock_fetch.return_value = {
+            "success": True,
+            "rainfall_mm": 15.0,
+            "humidity": 80,
+            "temperature": 28.0
+        }
+
+        count_before = FloodRiskLog.objects.count()
+
+        payload = {
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+            "blockage_ratio": 0.5,
+            "drain_id": "D-01"
+        }
+        response = self.client.post(
+            reverse("flood_risk_assessment"),
+            payload,
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FloodRiskLog.objects.count(), count_before + 1)
+
+        latest_log = FloodRiskLog.objects.latest("id")
+        self.assertEqual(latest_log.latitude, 18.5204)
+        self.assertEqual(latest_log.longitude, 73.8567)
+        self.assertEqual(latest_log.blockage_ratio, 0.5)
+        self.assertEqual(latest_log.rainfall_mm, 15.0)
+        self.assertTrue(latest_log.risk_score > 0.0)
+        self.assertIn(latest_log.risk_level, ["LOW", "ELEVATED", "CRITICAL"])
+        self.assertTrue(len(latest_log.dispatch_action) > 0)
+        self.assertEqual(latest_log.drain.drain_id, "D-01")
+
+    def test_flood_risk_log_admin_registration(self):
+        from django.contrib import admin
+        self.assertIn(FloodRiskLog, admin.site._registry)
+        model_admin = admin.site._registry[FloodRiskLog]
+        self.assertEqual(
+            model_admin.list_display,
+            ('id', 'risk_level', 'risk_score', 'blockage_ratio', 'rainfall_mm', 'timestamp')
+        )
+        self.assertEqual(model_admin.list_filter, ('risk_level', 'timestamp'))
+        self.assertEqual(model_admin.search_fields, ('risk_level', 'dispatch_action'))
+        self.assertEqual(model_admin.ordering, ('-timestamp',))
+
+    def test_flood_risk_log_str(self):
+        log = FloodRiskLog.objects.create(
+            blockage_ratio=0.75,
+            rainfall_mm=20.0,
+            risk_score=0.85,
+            risk_level="CRITICAL",
+            dispatch_action="Immediate dispatch"
+        )
+        self.assertIn("CRITICAL", str(log))
+        self.assertIn("0.85", str(log))
+
+    @patch("api.views.get_detector")
+    @patch("api.views.fetch_live_rainfall")
+    def test_blockage_detection_view_persists_log_with_drain(self, mock_weather, mock_get_detector):
+        mock_weather.return_value = {"success": True, "rainfall_mm": 5.0}
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 40.0,
+            "detected_objects": ["plastic bottle"],
+            "water_flow_status": "Restricted",
+            "vision_confidence": "High",
+            "reasoning": "Partial blockage."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        img = Image.new("RGB", (50, 50), color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+
+        count_before = FloodRiskLog.objects.count()
+        response = self.client.post(
+            reverse("blockage-detection"),
+            {
+                "image": uploaded,
+                "drain_id": "D-01",
+                "lat": "18.5204",
+                "lon": "73.8567",
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FloodRiskLog.objects.count(), count_before + 1)
+        latest = FloodRiskLog.objects.latest("id")
+        self.assertEqual(latest.drain.drain_id, "D-01")
+        self.assertEqual(latest.latitude, 18.5204)
+        self.assertEqual(latest.longitude, 73.8567)
+        self.assertEqual(latest.blockage_ratio, 0.4)
+        self.assertEqual(latest.rainfall_mm, 5.0)
+
+    @patch("api.views.get_detector")
+    def test_blockage_detection_view_persists_log_without_drain(self, mock_get_detector):
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 10.0,
+            "detected_objects": [],
+            "water_flow_status": "Clear",
+            "vision_confidence": "High",
+            "reasoning": "Clear flow."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        img = Image.new("RGB", (50, 50), color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+
+        count_before = FloodRiskLog.objects.count()
+        response = self.client.post(reverse("blockage-detection"), {"image": uploaded})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FloodRiskLog.objects.count(), count_before + 1)
+        latest = FloodRiskLog.objects.latest("id")
+        self.assertIsNone(latest.drain)
+        self.assertIsNone(latest.latitude)
+        self.assertEqual(latest.blockage_ratio, 0.1)
+
+
+# =====================================================================
+# 8. PROCESSOR PIPELINE TESTS
+# =====================================================================
+
+class ProcessorPipelineTests(TestCase):
+    @patch("scripts.processor.fetch_live_rainfall")
+    @patch("scripts.processor.get_detector")
+    def test_process_image_creates_inspection_and_flood_risk_log(self, mock_get_detector, mock_weather):
+        import scripts.processor as processor
+
+        mock_weather.return_value = {
+            "success": True,
+            "rainfall_mm": 10.0,
+            "humidity": 70,
+            "temperature": 27.0
+        }
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 50.0,
+            "detected_objects": ["trash"],
+            "water_flow_status": "Restricted",
+            "vision_confidence": "High",
+            "reasoning": "Half covered."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        drain = Drain.objects.get(drain_id="D-01")
+        log_count_before = FloodRiskLog.objects.count()
+        insp_count_before = Inspection.objects.count()
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            img = Image.new("RGB", (60, 60), color="red")
+            img.save(tmp_path, format="JPEG")
+
+        try:
+            success = processor.process_image(drain, tmp_path)
+            self.assertTrue(success)
+            self.assertEqual(FloodRiskLog.objects.count(), log_count_before + 1)
+            self.assertEqual(Inspection.objects.count(), insp_count_before + 1)
+
+            drain.refresh_from_db()
+            self.assertEqual(drain.blockage_ratio, 0.5)
+            self.assertEqual(drain.current_status, "Elevated Risk")
+
+            latest_log = FloodRiskLog.objects.latest("id")
+            self.assertEqual(latest_log.drain, drain)
+            self.assertEqual(latest_log.blockage_ratio, 0.5)
+            self.assertEqual(latest_log.rainfall_mm, 10.0)
+            self.assertEqual(latest_log.risk_level, "ELEVATED")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @patch("scripts.processor.fetch_live_rainfall")
+    @patch("scripts.processor.get_detector")
+    def test_scan_once_workflow_moves_file(self, mock_get_detector, mock_weather):
+        import scripts.processor as processor
+
+        mock_weather.return_value = {
+            "success": True,
+            "rainfall_mm": 0.0,
+            "humidity": 60,
+            "temperature": 25.0
+        }
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 10.0,
+            "detected_objects": [],
+            "water_flow_status": "Clear",
+            "vision_confidence": "High",
+            "reasoning": "Clear flow."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            d01_dir = os.path.join(temp_root, "D-01")
+            os.makedirs(d01_dir, exist_ok=True)
+            img_path = os.path.join(d01_dir, "test_camera.jpg")
+            img = Image.new("RGB", (50, 50), color="green")
+            img.save(img_path, format="JPEG")
+
+            with patch.object(processor, "IMAGES_ROOT", temp_root):
+                processor.scan_once()
+
+            # Image should be moved to processed
+            self.assertFalse(os.path.exists(img_path))
+            processed_img_path = os.path.join(d01_dir, "processed", "test_camera.jpg")
+            self.assertTrue(os.path.exists(processed_img_path))
+
 

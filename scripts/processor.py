@@ -11,7 +11,7 @@ import django
 django.setup()
 
 from django.core.files import File
-from api.models import Drain, Inspection
+from api.models import Drain, Inspection, FloodRiskLog
 from api.detector import get_detector
 from api.services import fetch_live_rainfall
 from api.risk import compute_risk_score, classify_risk
@@ -73,6 +73,17 @@ def process_image(drain: Drain, image_path: str):
     )
     with open(image_path, "rb") as f:
         inspection.image.save(os.path.basename(image_path), File(f), save=True)
+
+    FloodRiskLog.objects.create(
+        drain=drain,
+        latitude=drain.latitude,
+        longitude=drain.longitude,
+        blockage_ratio=round(blockage_ratio, 3),
+        rainfall_mm=rainfall_mm,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        dispatch_action=dispatch_action,
+    )
 
     print(f"  [SAVED] {drain.drain_id} ({drain.name or drain.area_name}) -> {new_status} (blockage {blockage_ratio:.2f}, risk score {risk_score})")
     return True
