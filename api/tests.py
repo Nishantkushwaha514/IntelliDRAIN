@@ -833,3 +833,53 @@ class ProcessorPipelineTests(TestCase):
             self.assertFalse(os.path.exists(img_path))
             processed_img_path = os.path.join(d01_dir, "processed", "test_camera.jpg")
             self.assertTrue(os.path.exists(processed_img_path))
+
+    @patch("scripts.processor.fetch_live_rainfall")
+    @patch("scripts.processor.get_detector")
+    def test_process_image_weather_unavailable_preserves_drain_state(self, mock_get_detector, mock_weather):
+        """When weather API fails, drain risk state is preserved, not downgraded."""
+        import scripts.processor as processor
+
+        mock_weather.return_value = {"success": False, "error": "API timeout"}
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 80.0,
+            "detected_objects": ["trash"],
+            "water_flow_status": "Blocked",
+            "vision_confidence": "High",
+            "reasoning": "Heavily blocked."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        drain = Drain.objects.get(drain_id="D-02")
+        drain.risk_level = "CRITICAL"
+        drain.current_status = "Blocked"
+        drain.rainfall_last_hour_mm = 45.0
+        drain.save()
+
+        log_count_before = FloodRiskLog.objects.count()
+        insp_count_before = Inspection.objects.count()
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            img = Image.new("RGB", (60, 60), color="blue")
+            img.save(tmp_path, format="JPEG")
+
+        try:
+            success = processor.process_image(drain, tmp_path)
+            self.assertTrue(success)
+
+            drain.refresh_from_db()
+            self.assertEqual(drain.blockage_ratio, 0.8)
+            self.assertEqual(drain.risk_level, "CRITICAL")
+            self.assertEqual(drain.current_status, "Blocked")
+            self.assertEqual(drain.rainfall_last_hour_mm, 45.0)
+            self.assertEqual(FloodRiskLog.objects.count(), log_count_before)
+            self.assertEqual(Inspection.objects.count(), insp_count_before + 1)
+            latest_insp = Inspection.objects.latest("id")
+            self.assertEqual(latest_insp.risk_level, "UNKNOWN")
+            self.assertEqual(latest_insp.status, "Pending Review")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
