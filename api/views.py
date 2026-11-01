@@ -3,6 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 
 from .detector import get_detector
 from .services import fetch_live_rainfall
@@ -21,6 +22,10 @@ class BlockageDetectionView(APIView):
     case (avoids recording fabricated rainfall_mm=0.0).
     HTTP 200 is preserved for Android compatibility.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request, *args, **kwargs):
@@ -194,6 +199,10 @@ class FloodRiskAssessmentView(APIView):
     Takes lat/lon + a blockage ratio, fetches live weather, and returns
     a flood risk assessment.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def post(self, request, *args, **kwargs):
         lat = request.data.get("latitude")
         lon = request.data.get("longitude")
@@ -334,6 +343,10 @@ class DrainListView(APIView):
     GET  /api/drains/ — Returns all drains, supporting ?search=, ?name=, ?location=, ?drainId=.
     POST /api/drains/ — Dynamically registers a new drain location with validation.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request):
         qs = Drain.objects.all()
 
@@ -444,6 +457,10 @@ class DrainDetailView(APIView):
     GET /api/drains/{identifier}/ — Full details for one drain (by drain_id or integer ID).
     PUT / PATCH /api/drains/{identifier}/ — Update drain location or master details.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)
@@ -500,6 +517,10 @@ class DrainStatusView(APIView):
     POST / PATCH /api/drains/{identifier}/status/ — Update status, preserve previous status,
                                                     and append entry to drain's history.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)
@@ -621,6 +642,10 @@ class DrainHistoryView(APIView):
     GET  /api/drains/{identifier}/history/ — Past records strictly isolated for this drain.
     POST /api/drains/{identifier}/history/ — Append a historical record / remarks for this drain.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)

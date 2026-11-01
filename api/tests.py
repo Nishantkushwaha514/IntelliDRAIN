@@ -1017,4 +1017,32 @@ class ProcessorPipelineTests(TestCase):
             with patch.object(processor, "IMAGES_ROOT", temp_root):
                 processor.scan_once()
             failed_files = os.listdir(os.path.join(d01_dir, "failed"))
-            self.assertEqual(len(failed_files), 1)
+            self.assertEqual(len(failed_files), 1)
+
+
+# =====================================================================
+# 9. PERMISSION CONFIG REGRESSION TESTS
+# =====================================================================
+
+class PermissionConfigTests(TestCase):
+    """Verify P0 permission config does not break anonymous access."""
+
+    def test_anonymous_can_read_drains(self):
+        """Anonymous GET on /api/drains/ still works (Android compatibility)."""
+        response = self.client.get(reverse("drain-list"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_anonymous_can_write_drains(self):
+        """Anonymous POST still works in P0 (P1 will enforce auth)."""
+        payload = {
+            "drainId": "D-PERM-TEST",
+            "name": "Permission Test Drain",
+            "latitude": 18.5,
+            "longitude": 73.8,
+            "approxArea": "Test Area",
+        }
+        response = self.client.post(
+            reverse("drain-list"), payload, content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+
