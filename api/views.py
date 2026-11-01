@@ -10,6 +10,18 @@ from .services import fetch_live_rainfall
 from .risk import compute_risk_score, classify_risk
 from .models import Drain, Inspection, FloodRiskLog
 
+# ---------------------------------------------------------------------------
+# Upload validation constants (C14)
+# ---------------------------------------------------------------------------
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+MAX_IMAGE_PIXELS = 50_000_000  # 50 MP decompression-bomb guard
+
 
 class BlockageDetectionView(APIView):
     """
@@ -37,8 +49,33 @@ class BlockageDetectionView(APIView):
 
         uploaded_image = request.FILES['image']
 
+        # C14: file size check (belt-and-braces with settings limits)
+        if uploaded_image.size > MAX_IMAGE_UPLOAD_BYTES:
+            return Response(
+                {"error": "Image too large. Maximum size is 10 MB."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # C14: MIME type check
+        if uploaded_image.content_type not in ALLOWED_IMAGE_MIME_TYPES:
+            return Response(
+                {"error": f"Unsupported image type '{uploaded_image.content_type}'. Allowed: image/jpeg, image/png, image/webp."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
+            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
             pil_image = Image.open(uploaded_image)
+            if pil_image.format not in ALLOWED_IMAGE_FORMATS:
+                return Response(
+                    {"error": f"Unsupported image format '{pil_image.format}'. Allowed: JPEG, PNG, WEBP."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if (pil_image.width * pil_image.height) > MAX_IMAGE_PIXELS:
+                return Response(
+                    {"error": f"Image dimensions too large ({pil_image.width}x{pil_image.height}). Maximum {MAX_IMAGE_PIXELS} pixels."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             pil_image.verify()
             uploaded_image.seek(0)
         except Exception as e:

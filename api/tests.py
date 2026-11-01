@@ -208,7 +208,7 @@ class BlockageDetectionViewTests(TestCase):
         self.assertEqual(response.json()["error"], "No image file provided. Please send an image file under the key 'image'.")
 
     def test_post_invalid_image_file(self):
-        invalid_file = SimpleUploadedFile("test.txt", b"not-an-image-data", content_type="text/plain")
+        invalid_file = SimpleUploadedFile("test.jpg", b"not-an-image-data", content_type="image/jpeg")
         response = self.client.post(self.url, {"image": invalid_file})
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.json())
@@ -1045,4 +1045,46 @@ class PermissionConfigTests(TestCase):
             reverse("drain-list"), payload, content_type="application/json"
         )
         self.assertEqual(response.status_code, 201)
+
+
+# =====================================================================
+# 10. UPLOAD VALIDATION TESTS (C14)
+# =====================================================================
+
+class UploadValidationTests(TestCase):
+    """C14: upload size/MIME/format/pixel limits."""
+
+    def setUp(self):
+        self.url = reverse("blockage-detection")
+
+    def test_oversize_image_rejected(self):
+        """11 MB upload returns 400 without calling the detector."""
+        big = b"x" * (11 * 1024 * 1024)
+        uploaded = SimpleUploadedFile("big.jpg", big, content_type="image/jpeg")
+        with patch("api.views.get_detector") as mock_get_detector:
+            response = self.client.post(self.url, {"image": uploaded})
+            mock_get_detector.assert_not_called()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("too large", response.json()["error"].lower())
+
+    def test_wrong_mime_type_rejected(self):
+        """Non-image MIME returns 400 without calling the detector."""
+        uploaded = SimpleUploadedFile("fake.txt", b"not an image", content_type="text/plain")
+        with patch("api.views.get_detector") as mock_get_detector:
+            response = self.client.post(self.url, {"image": uploaded})
+            mock_get_detector.assert_not_called()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsupported image type", response.json()["error"].lower())
+
+    def test_wrong_format_rejected(self):
+        """GIF bytes labeled as image/jpeg is rejected by format check."""
+        buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="blue").save(buf, format="GIF")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.gif", buf.read(), content_type="image/jpeg")
+        with patch("api.views.get_detector") as mock_get_detector:
+            response = self.client.post(self.url, {"image": uploaded})
+            mock_get_detector.assert_not_called()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsupported image format", response.json()["error"].lower())
 
