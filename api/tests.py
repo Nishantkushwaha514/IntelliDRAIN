@@ -981,3 +981,40 @@ class ProcessorPipelineTests(TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    @patch("scripts.processor.get_detector")
+    def test_gemini_failure_moves_to_failed_folder(self, mock_get_detector):
+        """Gemini failure moves image to failed/ — no retry loop (C10)."""
+        import scripts.processor as processor
+
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "error",
+            "error": "Quota exceeded",
+            "blockage_percentage": 0.0,
+        }
+        mock_get_detector.return_value = mock_detector
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            d01_dir = os.path.join(temp_root, "D-01")
+            os.makedirs(d01_dir, exist_ok=True)
+            img_path = os.path.join(d01_dir, "test_quota.jpg")
+            img = Image.new("RGB", (50, 50), color="blue")
+            img.save(img_path, format="JPEG")
+
+            with patch.object(processor, "IMAGES_ROOT", temp_root):
+                processor.scan_once()
+
+            # Image moved out of the original folder
+            self.assertFalse(os.path.exists(img_path))
+            # Moved to failed/, NOT to processed/
+            failed_path = os.path.join(d01_dir, "failed", "test_quota.jpg")
+            processed_path = os.path.join(d01_dir, "processed", "test_quota.jpg")
+            self.assertTrue(os.path.exists(failed_path))
+            self.assertFalse(os.path.exists(processed_path))
+
+            # Second scan does nothing — image is gone from original folder
+            with patch.object(processor, "IMAGES_ROOT", temp_root):
+                processor.scan_once()
+            failed_files = os.listdir(os.path.join(d01_dir, "failed"))
+            self.assertEqual(len(failed_files), 1)

@@ -166,6 +166,16 @@ def scan_once():
                         base, ext = os.path.splitext(filename)
                         dest_file = os.path.join(processed_dir, f"{base}_{int(time.time())}{ext}")
                     shutil.move(image_path, dest_file)
+                else:
+                    # Gemini failed — move to failed/ so we do not retry every 10s
+                    failed_dir = os.path.join(folder_path, "failed")
+                    os.makedirs(failed_dir, exist_ok=True)
+                    dest_file = os.path.join(failed_dir, filename)
+                    if os.path.exists(dest_file):
+                        base, ext = os.path.splitext(filename)
+                        dest_file = os.path.join(failed_dir, f"{base}_{int(time.time())}{ext}")
+                    shutil.move(image_path, dest_file)
+                    print(f"  [MOVED TO FAILED] {filename} — will not be retried automatically")
             except Exception as e:
                 print(f"  [ERROR] Unexpected error processing {filename}: {e}")
 
