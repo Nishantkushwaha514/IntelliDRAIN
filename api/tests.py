@@ -610,6 +610,29 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertTrue(len(data) >= 1)
         self.assertEqual(data[0]["status"], "Cleared")
 
+    def test_status_unblocked_maps_to_low_not_critical(self):
+        """'Unblocked' must be LOW, not CRITICAL (regression for C9 substring bug)."""
+        response = self.client.post(
+            reverse("drain-status", kwargs={"identifier": "D-03"}),
+            {"currentStatus": "Unblocked", "remarks": "Cleared after cleaning"},
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["risk_level"], "LOW")
+        drain = Drain.objects.get(drain_id="D-03")
+        self.assertEqual(drain.risk_level, "LOW")
+
+    def test_status_not_blocked_maps_to_low_not_critical(self):
+        """'Not blocked' must be LOW, not CRITICAL (regression for C9 substring bug)."""
+        response = self.client.post(
+            reverse("drain-status", kwargs={"identifier": "D-03"}),
+            {"currentStatus": "Not blocked", "remarks": "Verified clear"},
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["risk_level"], "LOW")
+
 
 # =====================================================================
 # 7. FLOOD RISK LOG PERSISTENCE AND ADMIN TESTS

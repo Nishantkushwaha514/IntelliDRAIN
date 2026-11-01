@@ -557,14 +557,32 @@ class DrainStatusView(APIView):
             except (ValueError, TypeError):
                 pass
 
-        # Risk classification synchronization
-        status_lower = new_status.lower()
-        if any(w in status_lower for w in ["block", "critical", "danger", "overflow"]):
-            drain.risk_level = "CRITICAL"
-        elif any(w in status_lower for w in ["elevated", "moderate", "warning", "caution", "restrict"]):
-            drain.risk_level = "ELEVATED"
-        elif any(w in status_lower for w in ["normal", "clear", "cleared", "good", "safe"]):
-            drain.risk_level = "LOW"
+        # Risk classification synchronization — exact match only (fixes C9).
+        # Substring matching previously classified "Unblocked"/"Not blocked"
+        # as CRITICAL because "block" is a substring of "unblocked".
+        status_risk_map = {
+            "blocked": "CRITICAL",
+            "critical": "CRITICAL",
+            "danger": "CRITICAL",
+            "overflow": "CRITICAL",
+            "elevated": "ELEVATED",
+            "elevated risk": "ELEVATED",
+            "moderate": "ELEVATED",
+            "warning": "ELEVATED",
+            "caution": "ELEVATED",
+            "restricted": "ELEVATED",
+            "normal": "LOW",
+            "clear": "LOW",
+            "cleared": "LOW",
+            "good": "LOW",
+            "safe": "LOW",
+            "unblocked": "LOW",
+            "not blocked": "LOW",
+        }
+        mapped_risk = status_risk_map.get(new_status.lower().strip())
+        if mapped_risk is not None:
+            drain.risk_level = mapped_risk
+        # Unrecognized status: preserve current risk_level (do not silently reset)
 
         drain.save()
 
