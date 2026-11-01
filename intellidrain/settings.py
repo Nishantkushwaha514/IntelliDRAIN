@@ -2,21 +2,36 @@
 Django settings for intellidrain project.
 """
 
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Load .env BEFORE anything else reads environment variables.
-# This is the fix for the earlier bug where OPENWEATHER_API_KEY / GEMINI_API_KEY
-# weren't being picked up when running "python manage.py runserver" directly.
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-8(%=l-x23pk3md5l+z!n7s#u+9+f*ji)si#+jklvsz01gv4c0v'
+# SECRET_KEY: required, no insecure fallback. App will fail to start if missing.
+try:
+    SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
+except KeyError:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY is not set. Copy .env.example to .env and set it."
+    )
 
-DEBUG = True
+# DEBUG: safe default (False). Set DJANGO_DEBUG=True in .env for local dev.
+DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 
-ALLOWED_HOSTS = ['*']
+# ALLOWED_HOSTS: safe default (local only). Override via env for production.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get(
+        "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver"
+    ).split(",")
+    if h.strip()
+]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
