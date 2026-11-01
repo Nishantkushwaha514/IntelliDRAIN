@@ -84,6 +84,18 @@ class BlockageDetectionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # C12: Validate drain_id before calling the detector to avoid wasting
+        # a Gemini API call when the referenced drain doesn't exist.
+        drain_id = request.data.get("drain_id") or request.data.get("drainId")
+        drain = None
+        if drain_id is not None and str(drain_id).strip():
+            drain = get_drain_or_404(drain_id)
+            if drain is None:
+                return Response(
+                    {"error": f"Drain '{drain_id}' not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
         try:
             detector = get_detector()
             analysis = detector.analyze_uploaded_file(uploaded_image)
@@ -119,10 +131,6 @@ class BlockageDetectionView(APIView):
         if lon is None:
             lon = request.data.get("lon")
 
-        drain_id = request.data.get("drain_id") or request.data.get("drainId")
-        drain = get_drain_or_404(drain_id) if drain_id else None
-
-        rainfall_mm = 0.0
         rainfall_status = "unavailable"
         rainfall_source = None
 
@@ -265,7 +273,14 @@ class FloodRiskAssessmentView(APIView):
         risk_level, dispatch_action = classify_risk(risk_score)
 
         drain_id = request.data.get("drain_id") or request.data.get("drainId")
-        drain = get_drain_or_404(drain_id) if drain_id else None
+        drain = None
+        if drain_id is not None and str(drain_id).strip():
+            drain = get_drain_or_404(drain_id)
+            if drain is None:
+                return Response(
+                    {"error": f"Drain '{drain_id}' not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
         FloodRiskLog.objects.create(
             drain=drain,

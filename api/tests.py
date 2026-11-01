@@ -1087,4 +1087,65 @@ class UploadValidationTests(TestCase):
             mock_get_detector.assert_not_called()
         self.assertEqual(response.status_code, 400)
         self.assertIn("unsupported image format", response.json()["error"].lower())
+
+
+# =====================================================================
+# 11. DRAIN ID VALIDATION TESTS (C12)
+# =====================================================================
+
+class DrainIdValidationTests(TestCase):
+    """C12: invalid drain_id returns 404; empty/absent drain_id is not an error."""
+
+    def test_blockage_detection_invalid_drain_id_returns_404(self):
+        """Invalid drain_id returns 404, not silent None."""
+        img = Image.new("RGB", (50, 50), color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+        with patch("api.views.get_detector") as mock_get_detector:
+            response = self.client.post(
+                reverse("blockage-detection"),
+                {"image": uploaded, "drain_id": "D-DOES-NOT-EXIST"}
+            )
+            mock_get_detector.assert_not_called()
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("not found", response.json()["error"].lower())
+
+    def test_blockage_detection_empty_drain_id_works(self):
+        """Empty drain_id is treated as 'not provided'; log created with drain=None."""
+        img = Image.new("RGB", (50, 50), color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 10.0,
+            "detected_objects": [],
+            "water_flow_status": "Clear",
+            "vision_confidence": "High",
+            "reasoning": "Clear."
+        }
+        count_before = FloodRiskLog.objects.count()
+        with patch("api.views.get_detector", return_value=mock_detector):
+            response = self.client.post(
+                reverse("blockage-detection"),
+                {"image": uploaded, "drain_id": "", "rain_mm": "0.0"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FloodRiskLog.objects.count(), count_before + 1)
+
+    def test_flood_risk_invalid_drain_id_returns_404(self):
+        """Invalid drain_id in FloodRiskAssessmentView returns 404."""
+        with patch("api.views.fetch_live_rainfall") as mock_fetch:
+            mock_fetch.return_value = {"success": True, "rainfall_mm": 5.0}
+            response = self.client.post(
+                reverse("flood_risk_assessment"),
+                {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": 0.5,
+                 "drain_id": "D-DOES-NOT-EXIST"},
+                content_type="application/json"
+            )
+        self.assertEqual(response.status_code, 404)
 
