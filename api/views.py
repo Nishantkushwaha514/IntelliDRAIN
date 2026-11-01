@@ -12,9 +12,14 @@ from .models import Drain, Inspection, FloodRiskLog
 
 class BlockageDetectionView(APIView):
     """
-    Accepts an image upload, runs Gemini analysis, and returns the
-    calculated blockage percentage and flood risk level.
-    Does NOT save anything — this is a pure calculator.
+    Accepts an image upload, runs Gemini analysis, and returns blockage and
+    flood risk.
+
+    When weather data is unavailable, risk is computed from blockage alone
+    and flagged with risk_confidence="partial" and
+    needs_manual_verification=True. No FloodRiskLog is persisted in that
+    case (avoids recording fabricated rainfall_mm=0.0).
+    HTTP 200 is preserved for Android compatibility.
     """
     parser_classes = (MultiPartParser, FormParser)
 
@@ -51,32 +56,92 @@ class BlockageDetectionView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        blockage_pct = analysis.get("blockage_percentage", 0.0)
+        # Clamp to [0, 100] to prevent complex-number TypeError in risk.py (C15)
+        raw_blockage = analysis.get("blockage_percentage", 0.0)
+        try:
+            blockage_pct = max(0.0, min(float(raw_blockage), 100.0))
+        except (ValueError, TypeError):
+            blockage_pct = 0.0
         blockage_ratio = blockage_pct / 100.0
 
-        rain_mm = request.data.get("rain_mm") or request.data.get("rainfall_mm")
-        lat = request.data.get("latitude") or request.data.get("lat")
-        lon = request.data.get("longitude") or request.data.get("lon")
+        # Use `is None` so explicit 0.0 values are honoured (A5)
+        rain_mm = request.data.get("rain_mm")
+        if rain_mm is None:
+            rain_mm = request.data.get("rainfall_mm")
+
+        lat = request.data.get("latitude")
+        if lat is None:
+            lat = request.data.get("lat")
+
+        lon = request.data.get("longitude")
+        if lon is None:
+            lon = request.data.get("lon")
 
         drain_id = request.data.get("drain_id") or request.data.get("drainId")
         drain = get_drain_or_404(drain_id) if drain_id else None
 
+        rainfall_mm = 0.0
+        rainfall_status = "unavailable"
+        rainfall_source = None
+
         if rain_mm is not None:
             try:
                 rainfall_mm = float(rain_mm)
+                rainfall_status = "provided"
+                rainfall_source = "request"
             except (ValueError, TypeError):
-                rainfall_mm = 0.0
+                return Response(
+                    {"error": "rain_mm/rainfall_mm must be numeric."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         elif lat is not None and lon is not None:
-            weather_metrics = fetch_live_rainfall(float(lat), float(lon))
-            rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
+            try:
+                lat_f = float(lat)
+                lon_f = float(lon)
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Latitude and longitude must be numeric."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            weather_metrics = fetch_live_rainfall(lat_f, lon_f)
+            rainfall_source = "weather_api"
+            if weather_metrics.get("success"):
+                rainfall_mm = weather_metrics["rainfall_mm"]
+                rainfall_status = "available"
         elif drain and drain.latitude is not None and drain.longitude is not None:
             weather_metrics = fetch_live_rainfall(drain.latitude, drain.longitude)
-            rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
-        else:
-            rainfall_mm = 0.0
+            rainfall_source = "weather_api"
+            if weather_metrics.get("success"):
+                rainfall_mm = weather_metrics["rainfall_mm"]
+                rainfall_status = "available"
 
-        risk_score = compute_risk_score(blockage_ratio, rainfall_mm)
-        risk_level, dispatch_action = classify_risk(risk_score)
+        rainfall_known = rainfall_status in ("available", "provided")
+
+        # Compute risk. Blockage-only case: rainfall treated as 0 for the
+        # formula, producing a conservative lower-bound estimate.
+        risk_input_rain = rainfall_mm if rainfall_known else 0.0
+        risk_score = compute_risk_score(blockage_ratio, risk_input_rain)
+        risk_level, base_dispatch = classify_risk(risk_score)
+
+        if rainfall_known:
+            risk_confidence = "full"
+            needs_verification = False
+            missing_inputs = []
+            dispatch_action = base_dispatch
+            verification_note = None
+        else:
+            risk_confidence = "partial"
+            needs_verification = True
+            missing_inputs = ["rainfall"]
+            dispatch_action = (
+                f"[Blockage-only estimate] {base_dispatch} "
+                "Verify rainfall manually before dispatch."
+            )
+            verification_note = (
+                "Risk estimated from blockage only. Actual risk may be "
+                "higher if currently raining. Verify weather conditions "
+                "manually before acting on this assessment."
+            )
 
         lat_float, lon_float = None, None
         if lat is not None and lon is not None:
@@ -89,16 +154,19 @@ class BlockageDetectionView(APIView):
             lat_float = drain.latitude
             lon_float = drain.longitude
 
-        FloodRiskLog.objects.create(
-            drain=drain,
-            latitude=lat_float,
-            longitude=lon_float,
-            blockage_ratio=round(blockage_ratio, 3),
-            rainfall_mm=rainfall_mm,
-            risk_score=risk_score,
-            risk_level=risk_level,
-            dispatch_action=dispatch_action,
-        )
+        # Persist log only when risk was computed with real rainfall.
+        # Prevents recording fabricated rainfall_mm=0.0 for unknown conditions.
+        if rainfall_known:
+            FloodRiskLog.objects.create(
+                drain=drain,
+                latitude=lat_float,
+                longitude=lon_float,
+                blockage_ratio=round(blockage_ratio, 3),
+                rainfall_mm=rainfall_mm,
+                risk_score=risk_score,
+                risk_level=risk_level,
+                dispatch_action=dispatch_action,
+            )
 
         return Response({
             "status": "success",
@@ -107,6 +175,13 @@ class BlockageDetectionView(APIView):
             "computed_risk_score": risk_score,
             "flood_risk_level": risk_level,
             "dispatch_action": dispatch_action,
+            "rainfall_mm": rainfall_mm if rainfall_known else None,
+            "rainfall_status": rainfall_status,
+            "rainfall_source": rainfall_source,
+            "risk_confidence": risk_confidence,
+            "risk_missing_inputs": missing_inputs,
+            "needs_manual_verification": needs_verification,
+            "verification_note": verification_note,
             "detected_objects": analysis.get("detected_objects", []),
             "water_flow_status": analysis.get("water_flow_status", "Unknown"),
             "vision_confidence": analysis.get("vision_confidence", "Low"),
@@ -591,4 +666,3 @@ class DrainHistoryView(APIView):
             drain.save()
 
         return Response(serialize_inspection(inspection), status=status.HTTP_201_CREATED)
-

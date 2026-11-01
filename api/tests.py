@@ -715,7 +715,8 @@ class FloodRiskLogPersistenceTests(TestCase):
         self.assertEqual(latest.rainfall_mm, 5.0)
 
     @patch("api.views.get_detector")
-    def test_blockage_detection_view_persists_log_without_drain(self, mock_get_detector):
+    def test_blockage_detection_view_no_weather_no_log(self, mock_get_detector):
+        """Without weather data, risk is partial and no FloodRiskLog is created."""
         mock_detector = MagicMock()
         mock_detector.analyze_uploaded_file.return_value = {
             "status": "success",
@@ -736,11 +737,85 @@ class FloodRiskLogPersistenceTests(TestCase):
         count_before = FloodRiskLog.objects.count()
         response = self.client.post(reverse("blockage-detection"), {"image": uploaded})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(FloodRiskLog.objects.count(), count_before + 1)
-        latest = FloodRiskLog.objects.latest("id")
-        self.assertIsNone(latest.drain)
-        self.assertIsNone(latest.latitude)
-        self.assertEqual(latest.blockage_ratio, 0.1)
+        data = response.json()
+        self.assertEqual(data["blockage_ratio"], 0.1)
+        self.assertEqual(data["rainfall_status"], "unavailable")
+        self.assertEqual(data["risk_confidence"], "partial")
+        self.assertTrue(data["needs_manual_verification"])
+        self.assertEqual(data["risk_missing_inputs"], ["rainfall"])
+        self.assertIsNone(data["rainfall_mm"])
+        # Log NOT created when rainfall unavailable
+        self.assertEqual(FloodRiskLog.objects.count(), count_before)
+
+    @patch("api.views.get_detector")
+    @patch("api.views.fetch_live_rainfall")
+    def test_blockage_detection_view_weather_failure_returns_partial(self, mock_weather, mock_get_detector):
+        """When weather API fails, risk is computed from blockage only with verification flag."""
+        mock_weather.return_value = {"success": False, "error": "API timeout"}
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 75.0,
+            "detected_objects": ["trash"],
+            "water_flow_status": "Blocked",
+            "vision_confidence": "High",
+            "reasoning": "Heavily blocked."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        img = Image.new("RGB", (50, 50), color="red")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+
+        count_before = FloodRiskLog.objects.count()
+        response = self.client.post(
+            reverse("blockage-detection"),
+            {"image": uploaded, "lat": "18.52", "lon": "73.85"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["blockage_ratio"], 0.75)
+        self.assertEqual(data["rainfall_status"], "unavailable")
+        self.assertEqual(data["rainfall_source"], "weather_api")
+        self.assertEqual(data["risk_confidence"], "partial")
+        self.assertTrue(data["needs_manual_verification"])
+        self.assertEqual(data["risk_missing_inputs"], ["rainfall"])
+        self.assertIsNone(data["rainfall_mm"])
+        # Risk computed from blockage only (rainfall=0)
+        self.assertEqual(data["flood_risk_level"], "CRITICAL")
+        self.assertGreater(data["computed_risk_score"], 0.8)
+        self.assertIn("Verify rainfall manually", data["dispatch_action"])
+        # Log NOT created when rainfall unavailable
+        self.assertEqual(FloodRiskLog.objects.count(), count_before)
+
+    @patch("api.views.get_detector")
+    def test_blockage_detection_view_invalid_lat_lon_returns_400(self, mock_get_detector):
+        """Non-numeric lat/lon returns 400, not 500 (fixes C11)."""
+        mock_detector = MagicMock()
+        mock_detector.analyze_uploaded_file.return_value = {
+            "status": "success",
+            "blockage_percentage": 20.0,
+            "detected_objects": [],
+            "water_flow_status": "Clear",
+            "vision_confidence": "High",
+            "reasoning": "Clear."
+        }
+        mock_get_detector.return_value = mock_detector
+
+        img = Image.new("RGB", (50, 50), color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("test.jpg", buf.read(), content_type="image/jpeg")
+
+        response = self.client.post(
+            reverse("blockage-detection"),
+            {"image": uploaded, "lat": "not-a-number", "lon": "73.85"}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("numeric", response.json()["error"])
 
 
 # =====================================================================
