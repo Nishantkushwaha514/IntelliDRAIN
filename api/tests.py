@@ -21,18 +21,11 @@ from api.services import fetch_live_rainfall
 
 class RiskFormulaTests(TestCase):
     def test_compute_risk_score_boundaries(self):
-        # Zero blockage, zero rain -> 0.0
         self.assertEqual(compute_risk_score(0.0, 0.0), 0.0)
-
-        # Full blockage (1.0) -> 1.0 regardless of rain
         self.assertEqual(compute_risk_score(1.0, 0.0), 1.0)
         self.assertEqual(compute_risk_score(1.0, 25.0), 1.0)
-
-        # Extreme rain (>= 50mm) -> 1.0 regardless of blockage
         self.assertEqual(compute_risk_score(0.0, 50.0), 1.0)
         self.assertEqual(compute_risk_score(0.0, 100.0), 1.0)
-
-        # Intermediate calculation
         score = compute_risk_score(0.3, 10.0)
         self.assertTrue(0.40 <= score <= 0.55)
 
@@ -92,8 +85,6 @@ class DetectorTests(TestCase):
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
             detector = GeminiDrainDetector()
-
-            # Create dummy image in memory
             buf = io.BytesIO()
             Image.new("RGB", (100, 100), color="blue").save(buf, format="JPEG")
             buf.seek(0)
@@ -113,7 +104,6 @@ class DetectorTests(TestCase):
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
             detector = GeminiDrainDetector()
-
             buf = io.BytesIO()
             Image.new("RGB", (100, 100), color="red").save(buf, format="JPEG")
             buf.seek(0)
@@ -162,19 +152,31 @@ class WeatherServiceTests(TestCase):
         self.assertEqual(res["temperature"], 30.0)
 
     @patch("requests.get")
-    def test_fetch_live_rainfall_unauthorized_fallback(self, mock_get):
+    def test_fetch_live_rainfall_401_returns_failure(self, mock_get):
+        """401 from weather API returns success=False, never fake 12.5mm."""
+        from requests.exceptions import HTTPError
+
         mock_response = MagicMock()
         mock_response.status_code = 401
-        from requests.exceptions import HTTPError
         mock_response.raise_for_status.side_effect = HTTPError("Unauthorized access")
         mock_get.return_value = mock_response
 
-        res = fetch_live_rainfall(19.0, 73.0)
-        self.assertTrue(res["success"])
-        self.assertEqual(res["rainfall_mm"], 12.5)
-        self.assertEqual(res["humidity"], 85)
-        self.assertEqual(res["temperature"], 26.5)
-        self.assertIn("note", res)
+        with patch.dict(os.environ, {"OPENWEATHER_API_KEY": "REAL_TEST_KEY"}):
+            res = fetch_live_rainfall(19.0, 73.0)
+
+        self.assertFalse(res["success"])
+        self.assertNotIn("rainfall_mm", res)
+        self.assertIn("error", res)
+
+    @patch("requests.get")
+    def test_fetch_live_rainfall_missing_key_returns_failure(self, mock_get):
+        """Missing API key returns success=False without calling the API."""
+        with patch.dict(os.environ, {}, clear=True):
+            res = fetch_live_rainfall(19.0, 73.0)
+
+        self.assertFalse(res["success"])
+        self.assertNotIn("rainfall_mm", res)
+        mock_get.assert_not_called()
 
     @patch("requests.get")
     def test_fetch_live_rainfall_network_exception_failure(self, mock_get):
@@ -270,8 +272,8 @@ class FloodRiskAssessmentViewTests(TestCase):
 
     def test_post_invalid_blockage_ratio_value(self):
         response = self.client.post(
-            self.url, 
-            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": "highly_blocked"}, 
+            self.url,
+            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": "highly_blocked"},
             content_type="application/json"
         )
         self.assertEqual(response.status_code, 400)
@@ -280,10 +282,10 @@ class FloodRiskAssessmentViewTests(TestCase):
     @patch("api.views.fetch_live_rainfall")
     def test_post_weather_service_gateway_error(self, mock_fetch):
         mock_fetch.return_value = {"success": False, "error": "API timeout connection details"}
-        
+
         response = self.client.post(
-            self.url, 
-            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": 0.4}, 
+            self.url,
+            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": 0.4},
             content_type="application/json"
         )
         self.assertEqual(response.status_code, 502)
@@ -299,19 +301,17 @@ class FloodRiskAssessmentViewTests(TestCase):
             "temperature": 25.0
         }
 
-        # Case A: blockage_ratio < 0 (should clip to 0.0)
         response = self.client.post(
-            self.url, 
-            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": -0.7}, 
+            self.url,
+            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": -0.7},
             content_type="application/json"
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["risk_analysis"]["input_blockage_ratio"], 0.0)
 
-        # Case B: blockage_ratio > 1 (should clip to 1.0)
         response = self.client.post(
-            self.url, 
-            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": 1.9}, 
+            self.url,
+            {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": 1.9},
             content_type="application/json"
         )
         self.assertEqual(response.status_code, 200)
@@ -334,18 +334,18 @@ class FloodRiskAssessmentViewTests(TestCase):
                 "humidity": 70,
                 "temperature": 27.0
             }
-            
+
             response = self.client.post(
-                self.url, 
-                {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": blockage}, 
+                self.url,
+                {"latitude": 18.5, "longitude": 73.2, "blockage_ratio": blockage},
                 content_type="application/json"
             )
             self.assertEqual(response.status_code, 200)
-            
+
             risk_analysis = response.json()["risk_analysis"]
             score = risk_analysis["computed_risk_score"]
             level = risk_analysis["flood_risk_level"]
-            
+
             self.assertEqual(level, expected_level)
             self.assertTrue(min_score <= score <= max_score, f"Score {score} not between {min_score} and {max_score} for blockage={blockage}, rain={rainfall}")
 
@@ -393,19 +393,16 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertTrue(found)
 
     def test_drain_list_filtering(self):
-        # Filter by name
         res_name = self.client.get(reverse("drain-list"), {"name": "Sangamwadi"})
         self.assertEqual(res_name.status_code, 200)
         data = res_name.json()
         self.assertTrue(len(data) >= 1)
         self.assertEqual(data[0]["drainId"], "D-01")
 
-        # Filter by location / area
         res_loc = self.client.get(reverse("drain-list"), {"location": "Koregaon"})
         self.assertEqual(res_loc.status_code, 200)
         self.assertTrue(any(d["drainId"] == "D-03" for d in res_loc.json()))
 
-        # Filter by drainId
         res_id = self.client.get(reverse("drain-list"), {"drainId": "D-02"})
         self.assertEqual(res_id.status_code, 200)
         self.assertEqual(len(res_id.json()), 1)
@@ -423,12 +420,10 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(data["currentStatus"], "Normal")
 
     def test_drain_detail_view_found_by_integer_and_drain_id(self):
-        # By string drain_id
         res1 = self.client.get(reverse("drain-detail", kwargs={"identifier": "D-TEST"}))
         self.assertEqual(res1.status_code, 200)
         self.assertEqual(res1.json()["drainId"], "D-TEST")
 
-        # By integer database id
         res2 = self.client.get(reverse("drain-detail", kwargs={"identifier": str(self.drain.id)}))
         self.assertEqual(res2.status_code, 200)
         self.assertEqual(res2.json()["id"], self.drain.id)
@@ -438,12 +433,10 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_drain_current_status_retrieval_and_update(self):
-        # 1. Get initial status
         res_get = self.client.get(reverse("drain-status", kwargs={"identifier": "D-01"}))
         self.assertEqual(res_get.status_code, 200)
         self.assertEqual(res_get.json()["currentStatus"], "Normal")
 
-        # 2. Update status with remarks
         update_payload = {
             "currentStatus": "Blocked",
             "remarks": "Water accumulation detected",
@@ -462,12 +455,10 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(update_data["risk_level"], "CRITICAL")
         self.assertEqual(update_data["historyEntry"]["remarks"], "Water accumulation detected")
 
-        # 3. Verify status changed in database
         drain = Drain.objects.get(drain_id="D-01")
         self.assertEqual(drain.current_status, "Blocked")
         self.assertEqual(drain.risk_level, "CRITICAL")
 
-        # 4. Verify history has recorded the change
         res_hist = self.client.get(reverse("drain-history", kwargs={"identifier": "D-01"}))
         self.assertEqual(res_hist.status_code, 200)
         history = res_hist.json()["history"]
@@ -478,27 +469,23 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(latest_entry["remarks"], "Water accumulation detected")
 
     def test_drain_history_isolation_between_drains(self):
-        # Update D-01
         self.client.post(
             reverse("drain-status", kwargs={"identifier": "D-01"}),
             {"currentStatus": "Blocked", "remarks": "Debris lodged in D-01 grate"},
             content_type="application/json"
         )
 
-        # Update D-02
         self.client.post(
             reverse("drain-status", kwargs={"identifier": "D-02"}),
             {"currentStatus": "Elevated", "remarks": "High silt deposit in D-02"},
             content_type="application/json"
         )
 
-        # Verify D-01 history does NOT contain D-02 remarks
         d1_hist = self.client.get(reverse("drain-history", kwargs={"identifier": "D-01"})).json()["history"]
         d1_remarks = [h["remarks"] for h in d1_hist]
         self.assertIn("Debris lodged in D-01 grate", d1_remarks)
         self.assertNotIn("High silt deposit in D-02", d1_remarks)
 
-        # Verify D-02 history does NOT contain D-01 remarks
         d2_hist = self.client.get(reverse("drain-history", kwargs={"identifier": "D-02"})).json()["history"]
         d2_remarks = [h["remarks"] for h in d2_hist]
         self.assertIn("High silt deposit in D-02", d2_remarks)
@@ -527,18 +514,16 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(data["approxArea"], "Yerawada")
         self.assertEqual(data["currentStatus"], "Normal")
 
-        # Verify it can be retrieved via detail
         detail_res = self.client.get(reverse("drain-detail", kwargs={"identifier": "D-11"}))
         self.assertEqual(detail_res.status_code, 200)
 
-        # Verify initial history exists
         hist_res = self.client.get(reverse("drain-history", kwargs={"identifier": "D-11"}))
         self.assertEqual(hist_res.status_code, 200)
         self.assertEqual(len(hist_res.json()["history"]), 1)
 
     def test_add_drain_validation_duplicate_id(self):
         payload = {
-            "drainId": "D-01",  # already exists in seeded master data
+            "drainId": "D-01",
             "name": "Duplicate Sangamwadi",
             "latitude": 18.5416,
             "longitude": 73.8734,
@@ -549,7 +534,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertIn("already exists", response.json()["error"])
 
     def test_add_drain_validation_coordinates_out_of_bounds(self):
-        # Latitude > 90
         res1 = self.client.post(
             reverse("drain-list"),
             {"drainId": "D-901", "name": "Invalid Lat", "latitude": 95.0, "longitude": 73.0, "approxArea": "Test"},
@@ -558,7 +542,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(res1.status_code, 400)
         self.assertIn("Latitude must be between -90 and 90", res1.json()["error"])
 
-        # Latitude < -90
         res2 = self.client.post(
             reverse("drain-list"),
             {"drainId": "D-902", "name": "Invalid Lat", "latitude": -95.0, "longitude": 73.0, "approxArea": "Test"},
@@ -567,7 +550,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(res2.status_code, 400)
         self.assertIn("Latitude must be between -90 and 90", res2.json()["error"])
 
-        # Longitude > 180
         res3 = self.client.post(
             reverse("drain-list"),
             {"drainId": "D-903", "name": "Invalid Lon", "latitude": 18.0, "longitude": 185.0, "approxArea": "Test"},
@@ -576,7 +558,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(res3.status_code, 400)
         self.assertIn("Longitude must be between -180 and 180", res3.json()["error"])
 
-        # Non-numeric coordinate
         res4 = self.client.post(
             reverse("drain-list"),
             {"drainId": "D-904", "name": "Bad Coord", "latitude": "invalid", "longitude": 73.0, "approxArea": "Test"},
@@ -586,7 +567,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertIn("numeric value", res4.json()["error"])
 
     def test_add_drain_validation_missing_required_fields(self):
-        # Missing approxArea
         res = self.client.post(
             reverse("drain-list"),
             {"drainId": "D-905", "name": "Missing Area", "latitude": 18.0, "longitude": 73.0},
@@ -619,7 +599,6 @@ class DrainModelAndEndpointTests(TestCase):
         self.assertEqual(data["newStatus"], "Warning")
         self.assertEqual(data["remarks"], "Quarterly manual inspection completed")
 
-        # Verify drain status updated
         drain = Drain.objects.get(drain_id="D-03")
         self.assertEqual(drain.current_status, "Warning")
 
@@ -851,9 +830,6 @@ class ProcessorPipelineTests(TestCase):
             with patch.object(processor, "IMAGES_ROOT", temp_root):
                 processor.scan_once()
 
-            # Image should be moved to processed
             self.assertFalse(os.path.exists(img_path))
             processed_img_path = os.path.join(d01_dir, "processed", "test_camera.jpg")
             self.assertTrue(os.path.exists(processed_img_path))
-
-
