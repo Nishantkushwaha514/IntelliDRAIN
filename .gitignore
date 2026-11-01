@@ -24,3 +24,9 @@ drain_images/*/*
 
 # Secrets
 .env
+
+# P0 cleanup: user-generated content should never be tracked
+drain_images/*/processed/*
+drain_images/*/failed/*
+!drain_images/*/processed/.gitkeep
+!drain_images/*/failed/.gitkeep
