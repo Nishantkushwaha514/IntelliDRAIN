@@ -58,7 +58,7 @@ class GeminiDrainDetector:
 
             response = None
             last_err = None
-            for model in [self.model_name, "gemini-3.8-flash", "gemini-flash-lite-latest", "gemini-2.5-flash"]:
+            for model in [self.model_name, "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.5-flash"]:
                 try:
                     response = self.client.models.generate_content(
                         model=model,

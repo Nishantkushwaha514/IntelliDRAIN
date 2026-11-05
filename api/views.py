@@ -22,6 +22,9 @@ ALLOWED_IMAGE_MIME_TYPES = {
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 MAX_IMAGE_PIXELS = 50_000_000  # 50 MP decompression-bomb guard
 
+# Set PIL's decompression-bomb guard once at module load (not per-request).
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
 
 class BlockageDetectionView(APIView):
     """
@@ -64,7 +67,6 @@ class BlockageDetectionView(APIView):
             )
 
         try:
-            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
             pil_image = Image.open(uploaded_image)
             if pil_image.format not in ALLOWED_IMAGE_FORMATS:
                 return Response(
@@ -131,6 +133,7 @@ class BlockageDetectionView(APIView):
         if lon is None:
             lon = request.data.get("lon")
 
+        rainfall_mm = None  # Initialised here; set inside the branches below.
         rainfall_status = "unavailable"
         rainfall_source = None
 
@@ -260,7 +263,16 @@ class FloodRiskAssessmentView(APIView):
         if lat is None or lon is None:
             return Response({"error": "Both 'latitude' and 'longitude' are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        weather_metrics = fetch_live_rainfall(float(lat), float(lon))
+        try:
+            lat_f = float(lat)
+            lon_f = float(lon)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "Latitude and longitude must be numeric."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        weather_metrics = fetch_live_rainfall(lat_f, lon_f)
         if not weather_metrics["success"]:
             return Response(
                 {"error": "Failed to fetch environmental metrics.", "details": weather_metrics.get("error")},
@@ -284,8 +296,8 @@ class FloodRiskAssessmentView(APIView):
 
         FloodRiskLog.objects.create(
             drain=drain,
-            latitude=float(lat),
-            longitude=float(lon),
+            latitude=lat_f,
+            longitude=lon_f,
             blockage_ratio=blockage_ratio,
             rainfall_mm=rainfall_mm,
             risk_score=risk_score,
@@ -295,7 +307,7 @@ class FloodRiskAssessmentView(APIView):
 
         return Response({
             "status": "success",
-            "coordinates": {"lat": lat, "lon": lon},
+            "coordinates": {"lat": lat_f, "lon": lon_f},
             "environmental_metrics": {
                 "rainfall_last_hour_mm": rainfall_mm,
                 "normalized_intensity": round(min(rainfall_mm / 50.0, 1.0), 2),
