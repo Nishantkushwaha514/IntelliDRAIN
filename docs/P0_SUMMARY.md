@@ -11,7 +11,7 @@
 | C1 | Hardcoded SECRET_KEY | security(P0) |
 | C2 | DEBUG=True | security(P0) |
 | C3 | ALLOWED_HOSTS=* | security(P0) |
-| C4 | setup_admin.py hardcoded creds | DELEGATED (teammate) |
+| C4 | setup_admin.py hardcoded creds | security(P1): moved to env vars / secure getpass |
 | C5 | Fake 12.5mm rainfall | fix(P0) |
 | C6 | Placeholder+timeout → fake 12.5 | fix(P0) |
 | C7 | Weather fail → silent 0.0 | fix(P0) |
@@ -29,8 +29,7 @@
 
 ## Still Pending
 
-- **C4** — `setup_admin.py` hardcoded admin credentials. Delegated to
-  teammate. Awaiting decision (fix / move to local / delete).
+- None. All C1–C18 findings resolved.
 
 ## Post-P0 Checklist (human actions)
 
