@@ -513,6 +513,12 @@ class DrainListView(APIView):
             risk_level="LOW"
         )
 
+        try:
+            from .history_exporter import export_drain_history_json
+            export_drain_history_json(drain)
+        except Exception:
+            pass
+
         return Response(serialize_drain(drain, full=True), status=status.HTTP_201_CREATED)
 
 
@@ -684,6 +690,12 @@ class DrainStatusView(APIView):
             risk_level=drain.risk_level
         )
 
+        try:
+            from .history_exporter import export_drain_history_json
+            export_drain_history_json(drain)
+        except Exception:
+            pass
+
         return Response({
             "status": "success",
             "message": "Drain status updated successfully.",
@@ -718,6 +730,19 @@ class DrainHistoryView(APIView):
 
         records = Inspection.objects.filter(drain=drain)
         records_data = [serialize_inspection(r) for r in records]
+
+        # Ensure json file on disk is kept up to date
+        try:
+            from .history_exporter import export_drain_history_json
+            export_drain_history_json(drain)
+        except Exception:
+            pass
+
+        if request.query_params.get("format") == "file" or request.query_params.get("download") == "true":
+            from django.http import FileResponse
+            from .history_exporter import export_drain_history_json
+            file_path = export_drain_history_json(drain)
+            return FileResponse(open(file_path, "rb"), as_attachment=True, filename=f"{drain.drain_id}_history.json")
 
         if request.query_params.get("style") == "list" or request.query_params.get("mode") == "list" or request.query_params.get("legacy") == "true":
             return Response(records_data, status=status.HTTP_200_OK)
@@ -771,5 +796,11 @@ class DrainHistoryView(APIView):
         if new_status and new_status != drain.current_status:
             drain.current_status = str(new_status)
             drain.save()
+
+        try:
+            from .history_exporter import export_drain_history_json
+            export_drain_history_json(drain)
+        except Exception:
+            pass
 
         return Response(serialize_inspection(inspection), status=status.HTTP_201_CREATED)

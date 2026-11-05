@@ -15,6 +15,7 @@ from api.models import Drain, Inspection, FloodRiskLog
 from api.detector import get_detector
 from api.services import fetch_live_rainfall
 from api.risk import compute_risk_score, classify_risk
+from api.history_exporter import export_drain_history_json
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_ROOT = os.path.join(BASE_DIR, "drain_images")
@@ -65,6 +66,11 @@ def process_image(drain: Drain, image_path: str):
         )
         with open(image_path, "rb") as f:
             inspection.image.save(os.path.basename(image_path), File(f), save=True)
+
+        try:
+            export_drain_history_json(drain)
+        except Exception as e:
+            print(f"  [WARN] Failed to export history JSON for {drain.drain_id}: {e}")
 
         print(f"  [DEFERRED] {drain.drain_id} ({drain.name or drain.area_name}) -> risk UNKNOWN (blockage {blockage_ratio:.2f}, weather unavailable)")
         return True
@@ -117,6 +123,12 @@ def process_image(drain: Drain, image_path: str):
         risk_level=risk_level,
         dispatch_action=dispatch_action,
     )
+
+    try:
+        json_file = export_drain_history_json(drain)
+        print(f"  [HISTORY] Updated {os.path.basename(json_file)}")
+    except Exception as e:
+        print(f"  [WARN] Failed to export history JSON for {drain.drain_id}: {e}")
 
     print(f"  [SAVED] {drain.drain_id} ({drain.name or drain.area_name}) -> {new_status} (blockage {blockage_ratio:.2f}, risk score {risk_score})")
     return True

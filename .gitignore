@@ -30,3 +30,8 @@ drain_images/*/processed/*
 drain_images/*/failed/*
 !drain_images/*/processed/.gitkeep
 !drain_images/*/failed/.gitkeep
+
+# Exported runtime history files (keep directory via .gitkeep)
+drain_history/*.json
+drain_history/*.tmp
+!drain_history/.gitkeep
