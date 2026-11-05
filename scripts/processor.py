@@ -18,10 +18,10 @@ from api.risk import compute_risk_score, classify_risk
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_ROOT = os.path.join(BASE_DIR, "drain_images")
-SCAN_INTERVAL_SECONDS = 10  # change to a smaller number (e.g. 30) for fast local testing
+SCAN_INTERVAL_SECONDS = 10
 VALID_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
-    
+
 def process_image(drain: Drain, image_path: str):
     print(f"  Analyzing {os.path.basename(image_path)} for {drain.name or drain.area_name} ({drain.drain_id})...")
 
@@ -34,16 +34,49 @@ def process_image(drain: Drain, image_path: str):
         return False
 
     blockage_ratio = analysis.get("blockage_percentage", 0.0) / 100.0
+    previous_status = drain.current_status or "Normal"
 
     weather = fetch_live_rainfall(drain.latitude, drain.longitude)
-    rainfall_mm = weather["rainfall_mm"] if weather.get("success") else 0.0
+    weather_available = weather.get("success", False)
+
+    if not weather_available:
+        # Weather unavailable: we have blockage data but cannot compute a
+        # reliable risk score. Do NOT downgrade drain state based on
+        # missing rainfall. Only record the blockage observation.
+        weather_error = weather.get("error", "unknown")
+        print(f"  [WEATHER UNAVAILABLE] {drain.drain_id}: {weather_error}. Risk not computed.")
+
+        drain.blockage_ratio = round(blockage_ratio, 3)
+        drain.last_inspection_date = date.today()
+        drain.save(update_fields=["blockage_ratio", "last_inspection_date", "last_updated"])
+
+        inspection = Inspection.objects.create(
+            drain=drain,
+            previous_status=previous_status,
+            new_status=previous_status,
+            remarks=(
+                f"Camera scan: blockage {blockage_ratio*100:.1f}%. "
+                f"Weather unavailable ({weather_error}); risk not computed."
+            ),
+            condition="Unknown",
+            blockage_ratio=round(blockage_ratio, 3),
+            risk_level="UNKNOWN",
+            status="Pending Review",
+        )
+        with open(image_path, "rb") as f:
+            inspection.image.save(os.path.basename(image_path), File(f), save=True)
+
+        print(f"  [DEFERRED] {drain.drain_id} ({drain.name or drain.area_name}) -> risk UNKNOWN (blockage {blockage_ratio:.2f}, weather unavailable)")
+        return True
+
+    # Weather available: full pipeline
+    rainfall_mm = weather["rainfall_mm"]
     humidity = weather.get("humidity", 0)
     temperature = weather.get("temperature", 0.0)
 
     risk_score = compute_risk_score(blockage_ratio, rainfall_mm)
     risk_level, dispatch_action = classify_risk(risk_score)
 
-    previous_status = drain.current_status or "Normal"
     if risk_level == "CRITICAL":
         new_status = "Blocked"
     elif risk_level == "ELEVATED":
@@ -99,7 +132,6 @@ def scan_once():
         if not os.path.isdir(folder_path):
             continue
 
-        # Extract potential drain identifier from folder name (e.g., drain_1, drain_D-01, D-01, D-01_Sangamwadi)
         raw_name = folder_name.replace("drain_", "")
         identifier = raw_name.split("_")[0]
 
@@ -111,7 +143,6 @@ def scan_once():
 
         if not drain:
             continue
-
 
         processed_dir = os.path.join(folder_path, "processed")
         os.makedirs(processed_dir, exist_ok=True)
@@ -135,6 +166,16 @@ def scan_once():
                         base, ext = os.path.splitext(filename)
                         dest_file = os.path.join(processed_dir, f"{base}_{int(time.time())}{ext}")
                     shutil.move(image_path, dest_file)
+                else:
+                    # Gemini failed — move to failed/ so we do not retry every 10s
+                    failed_dir = os.path.join(folder_path, "failed")
+                    os.makedirs(failed_dir, exist_ok=True)
+                    dest_file = os.path.join(failed_dir, filename)
+                    if os.path.exists(dest_file):
+                        base, ext = os.path.splitext(filename)
+                        dest_file = os.path.join(failed_dir, f"{base}_{int(time.time())}{ext}")
+                    shutil.move(image_path, dest_file)
+                    print(f"  [MOVED TO FAILED] {filename} — will not be retried automatically")
             except Exception as e:
                 print(f"  [ERROR] Unexpected error processing {filename}: {e}")
 
@@ -156,4 +197,3 @@ def run_forever():
 
 if __name__ == "__main__":
     run_forever()
-

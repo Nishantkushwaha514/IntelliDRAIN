@@ -3,19 +3,41 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 
 from .detector import get_detector
 from .services import fetch_live_rainfall
 from .risk import compute_risk_score, classify_risk
 from .models import Drain, Inspection, FloodRiskLog
 
+# ---------------------------------------------------------------------------
+# Upload validation constants (C14)
+# ---------------------------------------------------------------------------
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+MAX_IMAGE_PIXELS = 50_000_000  # 50 MP decompression-bomb guard
+
 
 class BlockageDetectionView(APIView):
     """
-    Accepts an image upload, runs Gemini analysis, and returns the
-    calculated blockage percentage and flood risk level.
-    Does NOT save anything — this is a pure calculator.
+    Accepts an image upload, runs Gemini analysis, and returns blockage and
+    flood risk.
+
+    When weather data is unavailable, risk is computed from blockage alone
+    and flagged with risk_confidence="partial" and
+    needs_manual_verification=True. No FloodRiskLog is persisted in that
+    case (avoids recording fabricated rainfall_mm=0.0).
+    HTTP 200 is preserved for Android compatibility.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request, *args, **kwargs):
@@ -27,8 +49,33 @@ class BlockageDetectionView(APIView):
 
         uploaded_image = request.FILES['image']
 
+        # C14: file size check (belt-and-braces with settings limits)
+        if uploaded_image.size > MAX_IMAGE_UPLOAD_BYTES:
+            return Response(
+                {"error": "Image too large. Maximum size is 10 MB."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # C14: MIME type check
+        if uploaded_image.content_type not in ALLOWED_IMAGE_MIME_TYPES:
+            return Response(
+                {"error": f"Unsupported image type '{uploaded_image.content_type}'. Allowed: image/jpeg, image/png, image/webp."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
+            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
             pil_image = Image.open(uploaded_image)
+            if pil_image.format not in ALLOWED_IMAGE_FORMATS:
+                return Response(
+                    {"error": f"Unsupported image format '{pil_image.format}'. Allowed: JPEG, PNG, WEBP."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if (pil_image.width * pil_image.height) > MAX_IMAGE_PIXELS:
+                return Response(
+                    {"error": f"Image dimensions too large ({pil_image.width}x{pil_image.height}). Maximum {MAX_IMAGE_PIXELS} pixels."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             pil_image.verify()
             uploaded_image.seek(0)
         except Exception as e:
@@ -36,6 +83,18 @@ class BlockageDetectionView(APIView):
                 {"error": f"Invalid image file. Details: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # C12: Validate drain_id before calling the detector to avoid wasting
+        # a Gemini API call when the referenced drain doesn't exist.
+        drain_id = request.data.get("drain_id") or request.data.get("drainId")
+        drain = None
+        if drain_id is not None and str(drain_id).strip():
+            drain = get_drain_or_404(drain_id)
+            if drain is None:
+                return Response(
+                    {"error": f"Drain '{drain_id}' not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
         try:
             detector = get_detector()
@@ -51,32 +110,88 @@ class BlockageDetectionView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        blockage_pct = analysis.get("blockage_percentage", 0.0)
+        # Clamp to [0, 100] to prevent complex-number TypeError in risk.py (C15)
+        raw_blockage = analysis.get("blockage_percentage", 0.0)
+        try:
+            blockage_pct = max(0.0, min(float(raw_blockage), 100.0))
+        except (ValueError, TypeError):
+            blockage_pct = 0.0
         blockage_ratio = blockage_pct / 100.0
 
-        rain_mm = request.data.get("rain_mm") or request.data.get("rainfall_mm")
-        lat = request.data.get("latitude") or request.data.get("lat")
-        lon = request.data.get("longitude") or request.data.get("lon")
+        # Use `is None` so explicit 0.0 values are honoured (A5)
+        rain_mm = request.data.get("rain_mm")
+        if rain_mm is None:
+            rain_mm = request.data.get("rainfall_mm")
 
-        drain_id = request.data.get("drain_id") or request.data.get("drainId")
-        drain = get_drain_or_404(drain_id) if drain_id else None
+        lat = request.data.get("latitude")
+        if lat is None:
+            lat = request.data.get("lat")
+
+        lon = request.data.get("longitude")
+        if lon is None:
+            lon = request.data.get("lon")
+
+        rainfall_status = "unavailable"
+        rainfall_source = None
 
         if rain_mm is not None:
             try:
                 rainfall_mm = float(rain_mm)
+                rainfall_status = "provided"
+                rainfall_source = "request"
             except (ValueError, TypeError):
-                rainfall_mm = 0.0
+                return Response(
+                    {"error": "rain_mm/rainfall_mm must be numeric."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         elif lat is not None and lon is not None:
-            weather_metrics = fetch_live_rainfall(float(lat), float(lon))
-            rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
+            try:
+                lat_f = float(lat)
+                lon_f = float(lon)
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Latitude and longitude must be numeric."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            weather_metrics = fetch_live_rainfall(lat_f, lon_f)
+            rainfall_source = "weather_api"
+            if weather_metrics.get("success"):
+                rainfall_mm = weather_metrics["rainfall_mm"]
+                rainfall_status = "available"
         elif drain and drain.latitude is not None and drain.longitude is not None:
             weather_metrics = fetch_live_rainfall(drain.latitude, drain.longitude)
-            rainfall_mm = weather_metrics["rainfall_mm"] if weather_metrics.get("success") else 0.0
-        else:
-            rainfall_mm = 0.0
+            rainfall_source = "weather_api"
+            if weather_metrics.get("success"):
+                rainfall_mm = weather_metrics["rainfall_mm"]
+                rainfall_status = "available"
 
-        risk_score = compute_risk_score(blockage_ratio, rainfall_mm)
-        risk_level, dispatch_action = classify_risk(risk_score)
+        rainfall_known = rainfall_status in ("available", "provided")
+
+        # Compute risk. Blockage-only case: rainfall treated as 0 for the
+        # formula, producing a conservative lower-bound estimate.
+        risk_input_rain = rainfall_mm if rainfall_known else 0.0
+        risk_score = compute_risk_score(blockage_ratio, risk_input_rain)
+        risk_level, base_dispatch = classify_risk(risk_score)
+
+        if rainfall_known:
+            risk_confidence = "full"
+            needs_verification = False
+            missing_inputs = []
+            dispatch_action = base_dispatch
+            verification_note = None
+        else:
+            risk_confidence = "partial"
+            needs_verification = True
+            missing_inputs = ["rainfall"]
+            dispatch_action = (
+                f"[Blockage-only estimate] {base_dispatch} "
+                "Verify rainfall manually before dispatch."
+            )
+            verification_note = (
+                "Risk estimated from blockage only. Actual risk may be "
+                "higher if currently raining. Verify weather conditions "
+                "manually before acting on this assessment."
+            )
 
         lat_float, lon_float = None, None
         if lat is not None and lon is not None:
@@ -89,16 +204,19 @@ class BlockageDetectionView(APIView):
             lat_float = drain.latitude
             lon_float = drain.longitude
 
-        FloodRiskLog.objects.create(
-            drain=drain,
-            latitude=lat_float,
-            longitude=lon_float,
-            blockage_ratio=round(blockage_ratio, 3),
-            rainfall_mm=rainfall_mm,
-            risk_score=risk_score,
-            risk_level=risk_level,
-            dispatch_action=dispatch_action,
-        )
+        # Persist log only when risk was computed with real rainfall.
+        # Prevents recording fabricated rainfall_mm=0.0 for unknown conditions.
+        if rainfall_known:
+            FloodRiskLog.objects.create(
+                drain=drain,
+                latitude=lat_float,
+                longitude=lon_float,
+                blockage_ratio=round(blockage_ratio, 3),
+                rainfall_mm=rainfall_mm,
+                risk_score=risk_score,
+                risk_level=risk_level,
+                dispatch_action=dispatch_action,
+            )
 
         return Response({
             "status": "success",
@@ -107,6 +225,13 @@ class BlockageDetectionView(APIView):
             "computed_risk_score": risk_score,
             "flood_risk_level": risk_level,
             "dispatch_action": dispatch_action,
+            "rainfall_mm": rainfall_mm if rainfall_known else None,
+            "rainfall_status": rainfall_status,
+            "rainfall_source": rainfall_source,
+            "risk_confidence": risk_confidence,
+            "risk_missing_inputs": missing_inputs,
+            "needs_manual_verification": needs_verification,
+            "verification_note": verification_note,
             "detected_objects": analysis.get("detected_objects", []),
             "water_flow_status": analysis.get("water_flow_status", "Unknown"),
             "vision_confidence": analysis.get("vision_confidence", "Low"),
@@ -119,6 +244,10 @@ class FloodRiskAssessmentView(APIView):
     Takes lat/lon + a blockage ratio, fetches live weather, and returns
     a flood risk assessment.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def post(self, request, *args, **kwargs):
         lat = request.data.get("latitude")
         lon = request.data.get("longitude")
@@ -144,7 +273,14 @@ class FloodRiskAssessmentView(APIView):
         risk_level, dispatch_action = classify_risk(risk_score)
 
         drain_id = request.data.get("drain_id") or request.data.get("drainId")
-        drain = get_drain_or_404(drain_id) if drain_id else None
+        drain = None
+        if drain_id is not None and str(drain_id).strip():
+            drain = get_drain_or_404(drain_id)
+            if drain is None:
+                return Response(
+                    {"error": f"Drain '{drain_id}' not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
         FloodRiskLog.objects.create(
             drain=drain,
@@ -259,6 +395,10 @@ class DrainListView(APIView):
     GET  /api/drains/ — Returns all drains, supporting ?search=, ?name=, ?location=, ?drainId=.
     POST /api/drains/ — Dynamically registers a new drain location with validation.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request):
         qs = Drain.objects.all()
 
@@ -369,6 +509,10 @@ class DrainDetailView(APIView):
     GET /api/drains/{identifier}/ — Full details for one drain (by drain_id or integer ID).
     PUT / PATCH /api/drains/{identifier}/ — Update drain location or master details.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)
@@ -425,6 +569,10 @@ class DrainStatusView(APIView):
     POST / PATCH /api/drains/{identifier}/status/ — Update status, preserve previous status,
                                                     and append entry to drain's history.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)
@@ -482,14 +630,32 @@ class DrainStatusView(APIView):
             except (ValueError, TypeError):
                 pass
 
-        # Risk classification synchronization
-        status_lower = new_status.lower()
-        if any(w in status_lower for w in ["block", "critical", "danger", "overflow"]):
-            drain.risk_level = "CRITICAL"
-        elif any(w in status_lower for w in ["elevated", "moderate", "warning", "caution", "restrict"]):
-            drain.risk_level = "ELEVATED"
-        elif any(w in status_lower for w in ["normal", "clear", "cleared", "good", "safe"]):
-            drain.risk_level = "LOW"
+        # Risk classification synchronization — exact match only (fixes C9).
+        # Substring matching previously classified "Unblocked"/"Not blocked"
+        # as CRITICAL because "block" is a substring of "unblocked".
+        status_risk_map = {
+            "blocked": "CRITICAL",
+            "critical": "CRITICAL",
+            "danger": "CRITICAL",
+            "overflow": "CRITICAL",
+            "elevated": "ELEVATED",
+            "elevated risk": "ELEVATED",
+            "moderate": "ELEVATED",
+            "warning": "ELEVATED",
+            "caution": "ELEVATED",
+            "restricted": "ELEVATED",
+            "normal": "LOW",
+            "clear": "LOW",
+            "cleared": "LOW",
+            "good": "LOW",
+            "safe": "LOW",
+            "unblocked": "LOW",
+            "not blocked": "LOW",
+        }
+        mapped_risk = status_risk_map.get(new_status.lower().strip())
+        if mapped_risk is not None:
+            drain.risk_level = mapped_risk
+        # Unrecognized status: preserve current risk_level (do not silently reset)
 
         drain.save()
 
@@ -528,6 +694,10 @@ class DrainHistoryView(APIView):
     GET  /api/drains/{identifier}/history/ — Past records strictly isolated for this drain.
     POST /api/drains/{identifier}/history/ — Append a historical record / remarks for this drain.
     """
+    # P0: explicit AllowAny — Android client compatibility.
+    # P1: change to IsAuthenticated once Android token auth is implemented.
+    permission_classes = [AllowAny]
+
     def get(self, request, identifier=None, id=None):
         key = identifier or id
         drain = get_drain_or_404(key)
@@ -591,4 +761,3 @@ class DrainHistoryView(APIView):
             drain.save()
 
         return Response(serialize_inspection(inspection), status=status.HTTP_201_CREATED)
-
