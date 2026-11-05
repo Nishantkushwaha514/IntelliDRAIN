@@ -32,11 +32,30 @@ if not users:
 for u in users:
     print(f"User: id={u.id}, username='{u.username}', email='{u.email}', is_staff={u.is_staff}, is_superuser={u.is_superuser}, is_active={u.is_active}")
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Create or update superuser
-username = "admin"
-password = "AdminPass123!"
+username = os.environ.get("DJANGO_SUPERUSER_USERNAME")
+password = os.environ.get("DJANGO_SUPERUSER_PASSWORD")
+email = os.environ.get("DJANGO_SUPERUSER_EMAIL", "")
+
+if not username or not password:
+    import getpass
+    print("Environment variables DJANGO_SUPERUSER_USERNAME / DJANGO_SUPERUSER_PASSWORD not set.")
+    print("Please enter superuser credentials interactively (password will not be echoed):")
+    if not username:
+        username = input("Username: ").strip()
+    if not password:
+        password = getpass.getpass("Password: ").strip()
+
+if not username or not password:
+    print("Error: Both username and password are required to create/update a superuser.")
+    sys.exit(1)
 
 user, created = User.objects.get_or_create(username=username)
+if email:
+    user.email = email
 user.is_staff = True
 user.is_superuser = True
 user.is_active = True
@@ -52,7 +71,6 @@ print(f"Attributes: is_staff={user.is_staff}, is_superuser={user.is_superuser}, 
 print("\n--- Authentication Test ---")
 auth_user = authenticate(username=username, password=password)
 if auth_user is not None:
-    print(f"SUCCESS: authenticate(username='{username}', password='***') succeeded!")
-    print(f"Authenticated user: id={auth_user.id}, username='{auth_user.username}', is_staff={auth_user.is_staff}, is_active={auth_user.is_active}")
+    print(f"SUCCESS: Authentication check succeeded for user '{username}'.")
 else:
     print("FAILURE: authenticate() returned None! Check backends or password hash.")
