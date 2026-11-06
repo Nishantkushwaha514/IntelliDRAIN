@@ -738,7 +738,7 @@ class DrainHistoryView(APIView):
         except Exception:
             pass
 
-        if request.query_params.get("format") == "file" or request.query_params.get("download") == "true":
+        if request.query_params.get("as_file") == "true" or request.query_params.get("download") == "true":
             from django.http import FileResponse
             from .history_exporter import export_drain_history_json
             file_path = export_drain_history_json(drain)
